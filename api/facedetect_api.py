@@ -2,8 +2,9 @@
 import os
 from flask import Blueprint, render_template, request, current_app, Response
 from flask_restful import Api
+
 import json
-from . import aws, model_api
+from . import aws, mtcnn_api
 from . import util
 
 bp = Blueprint("facedetect_api", __name__)
@@ -20,7 +21,7 @@ def render_file():
 
 
 # s3로 이미지 파일을 업로드하는 API
-@bp.route("/fileupload", methods=("GET", "POST"))
+@bp.route("/fileupload", methods=["POST"])
 def fileupload():
     response = Response(mimetype="application/json")
 
@@ -30,8 +31,9 @@ def fileupload():
                                     "exception msg": "No user_file key in request.files"})
         return response
 
-    file = request.files["user_file"]
-    file_url, err = aws.upload_file_to_s3(fileobj=file)
+    fileobj = request.files["user_file"]
+    savepath = fileobj.filename
+    file_url, err = aws.upload_fileobj_to_s3(fileobj=fileobj, savepath=savepath)
 
     # 파일 업로드 실패 시에 에러 메세지를 담은 리스폰스를 떨궈준다.
     if err:
@@ -49,30 +51,95 @@ def fileupload():
     return response
 
 
-# s3로 이미지 파일을 업로드 한 뒤, 얼굴 검출을 실행하고, 결과 이미지를 다시 s3에 업로드하는 API
-@bp.route("/facedetect", methods=("GET", "POST"))
+# 1. s3로 이미지 파일을 업로드
+# 2. 얼굴 검출을 실행
+# 3. 얼굴 검출 결과를 리턴
+@bp.route("/facedetect/bboxes", methods=["POST"])
 def facedetect():
-    # 요청을 통해 전달된 이미지를 받아 s3 상에 업로드
-    if "user_file" not in request.files:
-        return "No user_file key in request.files"
-    fileobj = request.files["user_file"]
-    aws.upload_file_to_s3(fileobj=fileobj, filedir="origin", filename=fileobj.filename)
+    response = Response(mimetype="application/json")
 
-    # s3 상에 업로드 된 url을 전달하여 얼굴 검출을 실행한 뒤, 얼굴 영역이 표시된 이미지를 받아온다.
-    file_url = "origin/%s" % fileobj.filename
-    facedtected_image = model_api.facedetect_from_url(file_url)
+    if "user_file" not in request.files:
+        response.status_code = 400
+        response.data = json.dumps({"message": "file upload fail",
+                                    "exception msg": "No user_file key in request.files"})
+        return response
+
+    file_obj = request.files["user_file"]
+    savepath = '{0}/{1}'.format('origin', file_obj.filename)
+    file_url, err = aws.upload_fileobj_to_s3(fileobj=file_obj, savepath=savepath)
+
+    # 파일 업로드 실패 시에 에러 메세지를 담은 리스폰스를 떨궈준다.
+    if err:
+        print("Exception :%s", err)
+        response.status_code = 500
+        response.data = json.dumps({"message": "file upload fail",
+                                    "exception msg": err})
+        return response
+
+    bboxes = mtcnn_api.detect(savepath)
+    response.status_code = 200
+    response.data = json.dumps({
+                                "code": response.status_code,
+                                "message": "face detection success",
+                                "num_faces": str(len(bboxes)),
+                                "bboxes": bboxes
+                              })
+    return response
+
+
+# 1. s3로 이미지 파일을 업로드
+# 2. 얼굴 검출을 실행
+# 3. 얼굴 영역을 원본 이미지에 표시하고 s3 상에 업로드
+@bp.route("/facedetect/draw", methods=["POST"])
+def facedetect_and_draw():
+    response = Response(mimetype="application/json")
+
+    if "user_file" not in request.files:
+        response.status_code = 400
+        response.data = json.dumps({"message": "file upload fail",
+                                    "exception msg": "No user_file key in request.files"})
+        return response
+
+    file_obj = request.files["user_file"]
+    savepath = '{0}/{1}'.format('origin', file_obj.filename)
+    file_url, err = aws.upload_fileobj_to_s3(fileobj=file_obj, savepath=savepath)
+
+    # 파일 업로드 실패 시에 에러 메세지를 담은 리스폰스를 떨궈준다.
+    if err:
+        print("Exception :%s", err)
+        response.status_code = 500
+        response.data = json.dumps({"message": "file upload fail",
+                                    "exception msg": err})
+        return response
+
+    facedtected_image = mtcnn_api.detect_and_draw(savepath)
 
     # 얼굴 영역이 표시된 이미지를 임시 폴더에 저장한다.
-    filename = util.current_time_str() + ".jpg"
+    filename = 'detected_{0}'.format(file_obj.filename)
     filepath = os.path.join(util.tmp_dir(), filename)
     facedtected_image.save(filepath)
 
+    savepath = '{0}/{1}'.format("facedetected", filename)
+
     # s3 상에 임시 이미지 파일을 업로드 한 뒤, 삭제해준다.
-    aws.upload_file_to_s3(filepath=filepath, filedir="facedetected", filename=filename)
+    file_url, err = aws.upload_file_to_s3(filepath=filepath, savepath=savepath)
     os.remove(filepath)
 
-    # s3 상에 저장된 얼굴 영역이 표시된 이미지 url을 json에 담아서 리턴한다.
-    s3_url = os.path.join(aws.get_aws_bucketurl(), "facedetected", filename)
-    return render_template("result.html", s3_url=s3_url)
+    # 파일 업로드 실패 시에 에러 메세지를 담은 리스폰스를 떨궈준다.
+    if err:
+        print("Exception :%s", err)
+        response.status_code = 500
+        response.data = json.dumps({"message": "file upload fail",
+                                    "exception msg": err})
+        return response
+
+    response.status_code = 200
+    response.data = json.dumps({
+        "code": response.status_code,
+        "message": "face detection success",
+        "facedetected_image": file_url
+    })
+
+    return response
 
 api = Api(bp)
