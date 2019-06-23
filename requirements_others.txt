@@ -1,0 +1,6 @@
+flask
+flask-restful
+boto3
+gunicorn
+Pillow
+numpy
