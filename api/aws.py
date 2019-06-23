@@ -29,27 +29,28 @@ def get_aws_bucketurl():
     return os.path.join(aws_host, bucket)
 
 
-def upload_file_to_s3(fileobj=None, filepath=None, filedir=None):
+def upload_fileobj_to_s3(fileobj, savepath):
     bucket = current_app.config['S3_BUCKET']
-    filename = fileobj.filename
-    if filedir:
-        savepath = '{0}/{1}'.format(filedir, filename)
-    else:
-        savepath = filename
     file_url = '{0}/{1}'.format(current_app.config['S3_URL'], savepath)
 
     s3 = get_aws_cli()
     err = None
     try:
-        if fileobj:
-            s3.upload_fileobj(fileobj, bucket, savepath, ExtraArgs={"ACL": "public-read"})
-            return file_url, err
-        elif filepath:
-            s3.upload_file(filepath, bucket, savepath, ExtraArgs={"ACL": "public-read"})
-            return file_url, err
-        else:
-            raise Exception
+        s3.upload_fileobj(fileobj, bucket, savepath, ExtraArgs={"ACL": "public-read"})
+        return file_url, err
+    except Exception as e:
+        err = e
+        return file_url, err
 
+def upload_file_to_s3(filepath, savepath):
+    bucket = current_app.config['S3_BUCKET']
+    file_url = '{0}/{1}'.format(current_app.config['S3_URL'], savepath)
+
+    s3 = get_aws_cli()
+    err = None
+    try:
+        s3.upload_file(filepath, bucket, savepath, ExtraArgs={"ACL": "public-read"})
+        return file_url, err
     except Exception as e:
         err = e
         return file_url, err
